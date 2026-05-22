@@ -3,6 +3,7 @@ import { ArrowRight, ExternalLink } from "../../assets/icons";
 import { PROVIDERS, LOCAL_PRESETS } from "../../constants";
 import { useI18n } from "../../components/useI18n";
 import VerifyWarningBanner from "../../components/VerifyWarningBanner";
+import { deriveApiKeyEnvFromBaseUrl } from "../../../../shared/provider-env";
 
 interface SetupProps {
   onComplete: () => void;
@@ -47,7 +48,7 @@ function Setup({
     if (/api\.cerebras\.ai/i.test(url)) return "CEREBRAS_API_KEY";
     if (/api\.mistral\.ai/i.test(url)) return "MISTRAL_API_KEY";
     if (/api\.perplexity\.ai/i.test(url)) return "PERPLEXITY_API_KEY";
-    return "CUSTOM_API_KEY";
+    return deriveApiKeyEnvFromBaseUrl(url) || "CUSTOM_API_KEY";
   }
 
   async function handleContinue(): Promise<void> {

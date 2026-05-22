@@ -22,5 +22,5 @@ export default {
   customProviderHint: "仅在自定义或本地提供商时需要填写",
   apiKeyLabel: "API Key",
   apiKeyHint:
-    "保存为环境变量。会按 URL 匹配对应的环境变量名,否则使用 CUSTOM_API_KEY。",
+    "保存为环境变量。会按 URL 匹配对应的环境变量名,未知域名会派生为 *_API_KEY。",
 } as const;

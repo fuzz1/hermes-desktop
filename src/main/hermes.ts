@@ -18,59 +18,41 @@ import {
   readEnv,
 } from "./config";
 import {
-  getSshTunnelUrl,
   isSshTunnelActive,
   isSshTunnelHealthy,
   startSshTunnel,
 } from "./ssh-tunnel";
-import { pidIsAliveAs, stripAnsi } from "./utils";
+import {
+  normalizeProfileName,
+  pidIsAliveAs,
+  profileHome,
+  stripAnsi,
+} from "./utils";
 import { readModels } from "./models";
 import { HIDDEN_SUBPROCESS_OPTIONS } from "./process-options";
 import { type Attachment, escapeXmlAttr } from "../shared/attachments";
+import {
+  backendContextKey,
+  getHermesBackendContext,
+  isRemoteBackend,
+  normaliseRemoteUrl,
+} from "./hermes-backend";
 
-const LOCAL_API_URL = "http://127.0.0.1:8642";
-
-/**
- * Normalise a remote-mode URL the user typed into the connection
- * settings.  Strips trailing slashes and, importantly, a trailing
- * `/v1` segment — callers append `/v1/<path>` themselves, so leaving
- * the user's `/v1` would produce `http://host/v1/v1/chat/completions`
- * → 404.  Reported as #266 (multiple users entered the URL "with
- * /v1" because the gateway's curl examples show that form).
- *
- * Also tolerates trailing whitespace and the rare `/v1/` (slash-suffixed)
- * form.  Returns the cleaned string.
- */
-export function normaliseRemoteUrl(raw: string): string {
-  let url = (raw || "").trim();
-  // Strip trailing slashes
-  url = url.replace(/\/+$/, "");
-  // Strip trailing `/v1` (callers append /v1/<path> themselves)
-  url = url.replace(/\/v1$/i, "");
-  return url;
-}
+const CLI_CHAT_FALLBACK_FLAG = "HERMES_DESKTOP_ALLOW_CLI_CHAT_FALLBACK";
+const GATEWAY_READY_TIMEOUT_FLAG = "HERMES_DESKTOP_GATEWAY_READY_TIMEOUT_MS";
+export { normaliseRemoteUrl } from "./hermes-backend";
 
 export function getApiUrl(): string {
-  const conn = getConnectionConfig();
-  if (conn.mode === "ssh") {
-    const sshUrl = getSshTunnelUrl();
-    if (!sshUrl) throw new Error("SSH tunnel is not active");
-    return normaliseRemoteUrl(sshUrl);
-  }
-  if (conn.mode === "remote" && conn.remoteUrl) {
-    return normaliseRemoteUrl(conn.remoteUrl);
-  }
-  return LOCAL_API_URL;
+  return getHermesBackendContext().apiBaseUrl;
 }
 
 export function isRemoteMode(): boolean {
-  const mode = getConnectionConfig().mode;
-  return mode === "remote" || mode === "ssh";
+  return isRemoteBackend();
 }
 
 /** True only for pure remote HTTP — SSH tunnel has full local access via SSH exec */
 export function isRemoteOnlyMode(): boolean {
-  return getConnectionConfig().mode === "remote";
+  return getHermesBackendContext().remoteOnly;
 }
 
 // Cached API key read from the remote .env when SSH tunnel starts
@@ -793,11 +775,52 @@ function sendMessageViaCli(
   };
 }
 
+function allowCliChatFallback(): boolean {
+  return /^(1|true|yes)$/i.test(process.env[CLI_CHAT_FALLBACK_FLAG] || "");
+}
+
+function failChat(message: string, cb: ChatCallbacks): ChatHandle {
+  queueMicrotask(() => cb.onError(message));
+  return { abort: () => {} };
+}
+
+async function waitForApiServerReady(timeoutMs = 10000): Promise<boolean> {
+  const override = Number(process.env[GATEWAY_READY_TIMEOUT_FLAG] || "");
+  if (Number.isFinite(override) && override >= 0) {
+    timeoutMs = override;
+  }
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await isApiServerReady()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } while (Date.now() < deadline);
+  return false;
+}
+
 // ────────────────────────────────────────────────────
 //  Public API: auto-routes to HTTP API or CLI fallback
 // ────────────────────────────────────────────────────
 
-let apiServerAvailable: boolean | null = null; // cached after first check
+const apiServerAvailability = new Map<string, boolean>();
+
+function apiAvailabilityKey(profile?: string): string {
+  return backendContextKey(profile);
+}
+
+function getCachedApiAvailability(profile?: string): boolean | null {
+  const key = apiAvailabilityKey(profile);
+  return apiServerAvailability.has(key)
+    ? apiServerAvailability.get(key)!
+    : null;
+}
+
+function setCachedApiAvailability(profile: string | undefined, value: boolean) {
+  apiServerAvailability.set(apiAvailabilityKey(profile), value);
+}
+
+function clearApiAvailability(): void {
+  apiServerAvailability.clear();
+}
 
 export async function sendMessage(
   message: string,
@@ -822,8 +845,10 @@ export async function sendMessage(
   }
 
   // Check API server availability (cache the result, re-check periodically)
+  let apiServerAvailable = getCachedApiAvailability(profile);
   if (apiServerAvailable === null || apiServerAvailable === false) {
     apiServerAvailable = await isApiServerReady();
+    setCachedApiAvailability(profile, apiServerAvailable);
   }
 
   if (apiServerAvailable) {
@@ -837,8 +862,27 @@ export async function sendMessage(
     );
   }
 
-  // Fallback to CLI
-  return sendMessageViaCli(message, cb, profile, resumeSessionId, attachments);
+  apiServerAvailable = await waitForApiServerReady();
+  setCachedApiAvailability(profile, apiServerAvailable);
+  if (apiServerAvailable) {
+    return sendMessageViaApi(
+      message,
+      cb,
+      profile,
+      resumeSessionId,
+      history,
+      attachments,
+    );
+  }
+
+  if (allowCliChatFallback()) {
+    return sendMessageViaCli(message, cb, profile, resumeSessionId, attachments);
+  }
+
+  return failChat(
+    "Hermes Gateway API is not available. Start the Gateway or set HERMES_DESKTOP_ALLOW_CLI_CHAT_FALLBACK=true to explicitly use the limited CLI chat fallback.",
+    cb,
+  );
 }
 
 // Lazy init — called on first sendMessage or gateway start
@@ -854,10 +898,11 @@ function ensureInitialized(): void {
   startHealthPolling();
 }
 
-function startHealthPolling(): void {
+function startHealthPolling(profile?: string): void {
   if (_healthCheckInterval) return;
   _healthCheckInterval = setInterval(async () => {
-    apiServerAvailable = await isApiServerReady();
+    const apiServerAvailable = await isApiServerReady();
+    setCachedApiAvailability(profile, apiServerAvailable);
     // Stop polling once API is confirmed available — only re-check on demand
     if (apiServerAvailable && _healthCheckInterval) {
       clearInterval(_healthCheckInterval);
@@ -877,8 +922,31 @@ export function stopHealthPolling(): void {
 //  Gateway management
 // ────────────────────────────────────────────────────
 
-let gatewayProcess: ChildProcess | null = null;
-let gatewayStartedByApp = false;
+interface GatewayRuntimeState {
+  process: ChildProcess | null;
+  startedByApp: boolean;
+  profile?: string;
+  startedAt?: number;
+}
+
+const gatewayState: GatewayRuntimeState = {
+  process: null,
+  startedByApp: false,
+};
+
+export function getGatewayRuntimeState(): {
+  startedByApp: boolean;
+  profile?: string;
+  startedAt?: number;
+  hasProcess: boolean;
+} {
+  return {
+    startedByApp: gatewayState.startedByApp,
+    profile: gatewayState.profile,
+    startedAt: gatewayState.startedAt,
+    hasProcess: !!gatewayState.process && !gatewayState.process.killed,
+  };
+}
 
 export function startGateway(profile?: string): boolean {
   // Defensive: the local gateway is never the right thing to spawn in
@@ -894,7 +962,13 @@ export function startGateway(profile?: string): boolean {
     return false;
   }
   ensureInitialized();
-  if (isGatewayRunning()) return false;
+  if (isGatewayRunning(profile)) return false;
+
+  const normalizedProfile = normalizeProfileName(profile);
+  const args = hermesCliArgs([
+    ...(normalizedProfile ? ["-p", normalizedProfile] : []),
+    "gateway",
+  ]);
 
   // Build gateway env with profile API keys
   const gatewayEnv: Record<string, string> = {
@@ -913,7 +987,7 @@ export function startGateway(profile?: string): boolean {
     }
   }
 
-  gatewayProcess = spawn(HERMES_PYTHON, hermesCliArgs(["gateway"]), {
+  gatewayState.process = spawn(HERMES_PYTHON, args, {
     cwd: HERMES_REPO,
     env: gatewayEnv,
     stdio: "ignore",
@@ -921,28 +995,40 @@ export function startGateway(profile?: string): boolean {
     ...HIDDEN_SUBPROCESS_OPTIONS,
   });
 
-  gatewayProcess.unref();
+  gatewayState.process.unref();
 
-  gatewayProcess.on("close", () => {
-    gatewayProcess = null;
-    gatewayStartedByApp = false;
-    apiServerAvailable = false;
+  gatewayState.process.on("close", () => {
+    gatewayState.process = null;
+    gatewayState.startedByApp = false;
+    gatewayState.profile = undefined;
+    gatewayState.startedAt = undefined;
+    clearApiAvailability();
     // Restart health polling to detect if gateway comes back
-    startHealthPolling();
+    startHealthPolling(profile);
+  });
+  gatewayState.process.on("error", (err) => {
+    console.warn("[gateway] process error:", err.message);
+    gatewayState.process = null;
+    gatewayState.startedByApp = false;
+    gatewayState.profile = undefined;
+    gatewayState.startedAt = undefined;
+    clearApiAvailability();
   });
 
-  gatewayStartedByApp = true;
+  gatewayState.startedByApp = true;
+  gatewayState.profile = normalizedProfile || "default";
+  gatewayState.startedAt = Date.now();
 
   // Wait a bit then check if API server came up
   setTimeout(async () => {
-    apiServerAvailable = await isApiServerReady();
+    setCachedApiAvailability(profile, await isApiServerReady());
   }, 3000);
 
   return true;
 }
 
-function readPidFile(): number | null {
-  const pidFile = join(HERMES_HOME, "gateway.pid");
+function readPidFile(profile?: string): number | null {
+  const pidFile = join(profileHome(profile), "gateway.pid");
   if (!existsSync(pidFile)) return null;
   try {
     const raw = readFileSync(pidFile, "utf-8").trim();
@@ -956,14 +1042,28 @@ function readPidFile(): number | null {
   }
 }
 
-export function stopGateway(force = false): void {
-  if (!force && !gatewayStartedByApp) return;
+export function stopGateway(force = false, profile?: string): void {
+  if (!force && !gatewayState.startedByApp) return;
+  const targetProfile =
+    profile === undefined && gatewayState.startedByApp
+      ? gatewayState.profile
+      : profile;
+  const normalizedProfile = normalizeProfileName(targetProfile);
+  const profileName = normalizedProfile || "default";
 
-  if (gatewayProcess && !gatewayProcess.killed) {
-    gatewayProcess.kill("SIGTERM");
-    gatewayProcess = null;
+  if (
+    gatewayState.process &&
+    !gatewayState.process.killed &&
+    (!targetProfile || gatewayState.profile === profileName)
+  ) {
+    try {
+      gatewayState.process.kill("SIGTERM");
+    } catch {
+      // Process may have already failed to spawn or exited between checks.
+    }
+    gatewayState.process = null;
   }
-  const pid = readPidFile();
+  const pid = readPidFile(targetProfile);
   if (pid) {
     try {
       process.kill(pid, "SIGTERM");
@@ -974,7 +1074,7 @@ export function stopGateway(force = false): void {
   // Always clear the PID file once we've signalled it. Leaving a stale PID
   // around means the next isGatewayRunning() / stopGateway() call can hit
   // an unrelated process that the OS has since assigned the same PID.
-  const pidFile = join(HERMES_HOME, "gateway.pid");
+  const pidFile = join(profileHome(targetProfile), "gateway.pid");
   if (existsSync(pidFile)) {
     try {
       unlinkSync(pidFile);
@@ -982,8 +1082,12 @@ export function stopGateway(force = false): void {
       // best-effort; will be overwritten on next gateway start
     }
   }
-  gatewayStartedByApp = false;
-  apiServerAvailable = false;
+  if (!targetProfile || gatewayState.profile === profileName) {
+    gatewayState.startedByApp = false;
+    gatewayState.profile = undefined;
+    gatewayState.startedAt = undefined;
+  }
+  clearApiAvailability();
 }
 
 // Python image prefixes covering both native Windows (pythonw.exe / python.exe)
@@ -991,15 +1095,23 @@ export function stopGateway(force = false): void {
 // gateway.pid actually belongs to a python process before reporting alive.
 const GATEWAY_IMAGE_PREFIXES = ["python", "pythonw"];
 
-export function isGatewayRunning(): boolean {
-  if (gatewayProcess && !gatewayProcess.killed) return true;
-  const pid = readPidFile();
+export function isGatewayRunning(profile?: string): boolean {
+  const normalizedProfile = normalizeProfileName(profile);
+  const profileName = normalizedProfile || "default";
+  if (
+    gatewayState.process &&
+    !gatewayState.process.killed &&
+    (!profile || gatewayState.profile === profileName)
+  ) {
+    return true;
+  }
+  const pid = readPidFile(profile);
   if (!pid) return false;
   return pidIsAliveAs(pid, GATEWAY_IMAGE_PREFIXES);
 }
 
 export function isApiReady(): boolean {
-  return apiServerAvailable === true;
+  return Array.from(apiServerAvailability.values()).some(Boolean);
 }
 
 export function testRemoteConnection(
@@ -1034,8 +1146,8 @@ export function restartGateway(profile?: string): void {
   // in remote/SSH mode.  Cheap to check; catches IPC paths that don't
   // wrap their restart calls in an isRemoteMode() check.
   if (isRemoteMode()) return;
-  if (!gatewayStartedByApp && !isGatewayRunning()) return;
-  stopGateway(true);
+  if (!gatewayState.startedByApp && !isGatewayRunning(profile)) return;
+  stopGateway(true, profile);
   setTimeout(() => {
     startGateway(profile);
   }, 500);

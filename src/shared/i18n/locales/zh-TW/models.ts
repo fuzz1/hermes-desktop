@@ -22,5 +22,5 @@ export default {
   customProviderHint: "僅在自訂或本機供應商時需要填寫",
   apiKeyLabel: "API Key",
   apiKeyHint:
-    "儲存為環境變數。會依 URL 符合對應的環境變數名稱，否則使用 CUSTOM_API_KEY。",
+    "儲存為環境變數。會依 URL 符合對應的環境變數名稱，未知網域會衍生為 *_API_KEY。",
 } as const;

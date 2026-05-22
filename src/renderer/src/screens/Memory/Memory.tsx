@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Plus, Trash, Refresh } from "../../assets/icons";
 import { useI18n } from "../../components/useI18n";
 import { Check, ExternalLink } from "lucide-react";
@@ -83,6 +83,10 @@ const PROVIDER_URLS: Record<string, string> = {
   byterover: "https://app.byterover.dev",
 };
 
+function isRedactedEnvValue(value: string): boolean {
+  return value.startsWith("********");
+}
+
 function Memory({ profile }: { profile?: string }): React.JSX.Element {
   const { t } = useI18n();
   const [data, setData] = useState<MemoryData | null>(null);
@@ -96,6 +100,7 @@ function Memory({ profile }: { profile?: string }): React.JSX.Element {
   const [providerEnv, setProviderEnv] = useState<Record<string, string>>({});
   const [providerSavedKey, setProviderSavedKey] = useState<string | null>(null);
   const [activating, setActivating] = useState<string | null>(null);
+  const providerDirtyKeys = useRef<Set<string>>(new Set());
 
   // Entry management
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -116,6 +121,7 @@ function Memory({ profile }: { profile?: string }): React.JSX.Element {
       window.hermesAPI.discoverMemoryProviders(profile),
       window.hermesAPI.getEnv(profile),
     ]);
+    providerDirtyKeys.current.clear();
     setData(d as MemoryData);
     setUserContent(d.user.content);
     setMemoryProvider(provider);
@@ -533,18 +539,27 @@ function Memory({ profile }: { profile?: string }): React.JSX.Element {
                             className="input"
                             type="password"
                             value={providerEnv[envKey] || ""}
-                            onChange={(e) =>
+                            onChange={(e) => {
+                              providerDirtyKeys.current.add(envKey);
                               setProviderEnv((prev) => ({
                                 ...prev,
                                 [envKey]: e.target.value,
-                              }))
-                            }
+                              }));
+                            }}
                             onBlur={async () => {
+                              const value = providerEnv[envKey] || "";
+                              if (
+                                !providerDirtyKeys.current.has(envKey) ||
+                                isRedactedEnvValue(value)
+                              ) {
+                                return;
+                              }
                               await window.hermesAPI.setEnv(
                                 envKey,
-                                providerEnv[envKey] || "",
+                                value,
                                 profile,
                               );
+                              providerDirtyKeys.current.delete(envKey);
                               setProviderSavedKey(envKey);
                               setTimeout(() => setProviderSavedKey(null), 2000);
                             }}

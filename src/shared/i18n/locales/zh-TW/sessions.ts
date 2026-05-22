@@ -13,4 +13,8 @@ export default {
   emptyHint: "開始聊天以建立第一個工作階段",
   messages: "則訊息",
   messageSingular: "則訊息",
+  deleteTitle: "刪除工作階段",
+  deleteConfirm: "刪除？",
+  yes: "是",
+  no: "否",
 } as const;

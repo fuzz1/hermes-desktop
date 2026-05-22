@@ -24,5 +24,5 @@ export default {
     "Necessário apenas para provedores personalizados ou locais",
   apiKeyLabel: "Chave da API",
   apiKeyHint:
-    "Armazenada como uma variável de ambiente. Escolhe a chave correspondente com base na URL ou CUSTOM_API_KEY caso contrário.",
+    "Armazenada como uma variável de ambiente. Escolhe a chave correspondente com base na URL ou deriva *_API_KEY para domínios desconhecidos.",
 } as const;

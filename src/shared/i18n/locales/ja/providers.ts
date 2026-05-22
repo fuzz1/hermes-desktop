@@ -1,4 +1,4 @@
 export default {
   title: "プロバイダ",
-  subtitle: "LLM プロバイダ、API キー、認証情報プールを設定します",
+  subtitle: "API キーと認証情報プールを管理します",
 } as const;

@@ -2,7 +2,10 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { SETTINGS_SECTIONS, PROVIDERS } from "../../constants";
 import { useI18n } from "../../components/useI18n";
 import BrandLogo from "../../components/common/BrandLogo";
-import { useDiscoveredModels } from "../../hooks/useDiscoveredModels";
+
+function isRedactedEnvValue(value: string): boolean {
+  return value.startsWith("********");
+}
 
 function Providers({
   profile,
@@ -18,14 +21,6 @@ function Providers({
   const [savedKey, setSavedKey] = useState<string | null>(null);
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
 
-  // Model config
-  const [modelProvider, setModelProvider] = useState("auto");
-  const [modelName, setModelName] = useState("");
-  const [modelBaseUrl, setModelBaseUrl] = useState("");
-  const [modelSaved, setModelSaved] = useState(false);
-  const modelLoaded = useRef(false);
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // Credential pool
   const [credPool, setCredPool] = useState<
     Record<string, Array<{ key: string; label: string }>>
@@ -34,107 +29,36 @@ function Providers({
   const [poolNewKey, setPoolNewKey] = useState("");
   const [poolNewLabel, setPoolNewLabel] = useState("");
 
-  // Per-key debounce timers for env auto-save on change. Previously env
-  // values were persisted only on input blur, so users who clicked the
-  // model dropdown (triggering the model-config auto-save) without first
-  // blurring the API key input lost their typed key — config.yaml
-  // updated but .env didn't. Issue #236. The on-blur handler stays as a
-  // "flush immediately" fast path; the debounce here catches the
-  // change-but-no-blur case.
+  // Per-key debounce timers for env auto-save on change. The on-blur handler
+  // stays as a "flush immediately" fast path; the debounce catches cases
+  // where users navigate away without explicitly blurring the input.
   const envSaveTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
   );
+  const envDirtyKeys = useRef<Set<string>>(new Set());
   // Mirror of `env` state, kept in a ref so the unmount cleanup can read
   // the latest value when flushing pending debounces (a closure over
   // `env` directly would capture a stale snapshot).
   const envRef = useRef<Record<string, string>>({});
 
   const loadConfig = useCallback(async (): Promise<void> => {
-    const [envData, mc, pool] = await Promise.all([
+    const [envData, pool] = await Promise.all([
       window.hermesAPI.getEnv(profile),
-      window.hermesAPI.getModelConfig(profile),
       window.hermesAPI.getCredentialPool(),
     ]);
+    envDirtyKeys.current.clear();
     setEnv(envData);
-    setModelProvider(mc.provider);
-    setModelName(mc.model);
-    setModelBaseUrl(mc.baseUrl);
     setCredPool(pool);
-
-    requestAnimationFrame(() => {
-      modelLoaded.current = true;
-    });
   }, [profile]);
 
   useEffect(() => {
-    modelLoaded.current = false;
     loadConfig();
   }, [loadConfig]);
 
-  // Refresh model config when the screen becomes visible
+  // Refresh credentials when the screen becomes visible.
   useEffect(() => {
-    if (!visible) return;
-    (async (): Promise<void> => {
-      const mc = await window.hermesAPI.getModelConfig(profile);
-      modelLoaded.current = false;
-      setModelProvider(mc.provider);
-      setModelName(mc.model);
-      setModelBaseUrl(mc.baseUrl);
-      requestAnimationFrame(() => {
-        modelLoaded.current = true;
-      });
-    })();
-  }, [visible, profile]);
-
-  // Auto-save the active model config (config.yaml) — debounced 500 ms so
-  // typing in the Model field still feels responsive.
-  const saveModelConfig = useCallback(async () => {
-    if (!modelLoaded.current) return;
-    await window.hermesAPI.setModelConfig(
-      modelProvider,
-      modelName,
-      modelBaseUrl,
-      profile,
-    );
-    setModelSaved(true);
-    setTimeout(() => setModelSaved(false), 2000);
-  }, [modelProvider, modelName, modelBaseUrl, profile]);
-
-  useEffect(() => {
-    if (!modelLoaded.current) return;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      saveModelConfig();
-    }, 500);
-    return () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-    };
-  }, [modelProvider, modelName, modelBaseUrl, saveModelConfig]);
-
-  // Separately, persist the (provider, model) pair to the Models library
-  // — but only after the user has been idle long enough that they've
-  // plausibly finished typing the model name.  The active-save debounce
-  // at 500 ms used to call `addModel` on every keystroke pause, leaving
-  // dead intermediate entries ("deepseek-reaso", "deepseek-reason", …)
-  // every time someone typed slowly.  2 s wait is enough for almost any
-  // real edit while still landing the entry without an explicit Save click.
-  const modelLibTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    if (!modelLoaded.current) return;
-    if (!modelName.trim()) return;
-    if (modelLibTimer.current) clearTimeout(modelLibTimer.current);
-    modelLibTimer.current = setTimeout(() => {
-      const displayName = modelName.split("/").pop() || modelName;
-      window.hermesAPI
-        .addModel(displayName, modelProvider, modelName, modelBaseUrl)
-        .catch(() => {
-          /* non-fatal — library write is best-effort */
-        });
-    }, 2000);
-    return () => {
-      if (modelLibTimer.current) clearTimeout(modelLibTimer.current);
-    };
-  }, [modelProvider, modelName, modelBaseUrl]);
+    if (visible) loadConfig();
+  }, [visible, loadConfig]);
 
   async function handleBlur(key: string): Promise<void> {
     // Cancel any pending debounced save for this key — the blur handler
@@ -145,24 +69,29 @@ function Providers({
       envSaveTimers.current.delete(key);
     }
     const value = env[key] || "";
+    if (!envDirtyKeys.current.has(key) || isRedactedEnvValue(value)) return;
     await window.hermesAPI.setEnv(key, value, profile);
+    envDirtyKeys.current.delete(key);
     setSavedKey(key);
     setTimeout(() => setSavedKey(null), 2000);
   }
 
   function handleChange(key: string, value: string): void {
+    envDirtyKeys.current.add(key);
     setEnv((prev) => ({ ...prev, [key]: value }));
 
     // Persist the typed value on change (debounced 400ms) so users who
-    // navigate away — or trigger the model-config auto-save by changing
-    // the provider dropdown — don't lose what they typed if they never
-    // explicitly blurred the input. Matches the model config's
-    // auto-save behavior; resolves the asymmetry behind issue #236.
+    // navigate away don't lose what they typed if they never explicitly
+    // blurred the input.
     const pending = envSaveTimers.current.get(key);
     if (pending) clearTimeout(pending);
     const timer = setTimeout(() => {
       envSaveTimers.current.delete(key);
-      void window.hermesAPI.setEnv(key, value, profile);
+      if (!isRedactedEnvValue(value)) {
+        void window.hermesAPI.setEnv(key, value, profile).then(() => {
+          envDirtyKeys.current.delete(key);
+        });
+      }
     }, 400);
     envSaveTimers.current.set(key, timer);
   }
@@ -183,7 +112,10 @@ function Providers({
     return () => {
       for (const [key, timer] of timers) {
         clearTimeout(timer);
-        void window.hermesAPI.setEnv(key, envRef.current[key] || "", profile);
+        const value = envRef.current[key] || "";
+        if (envDirtyKeys.current.has(key) && !isRedactedEnvValue(value)) {
+          void window.hermesAPI.setEnv(key, value, profile);
+        }
       }
       timers.clear();
     };
@@ -224,144 +156,12 @@ function Providers({
     });
   }
 
-  const isCustomProvider = modelProvider === "custom";
-
-  // Live model discovery: fetch the provider's /v1/models list and feed
-  // it into a datalist that powers the Model field's autocomplete.  Only
-  // runs once the Providers tab is visible so we don't fire on every
-  // background remount.
-  const [discoveryRefresh, setDiscoveryRefresh] = useState(0);
-  const discovery = useDiscoveredModels({
-    provider: modelProvider,
-    baseUrl: isCustomProvider ? modelBaseUrl : undefined,
-    profile,
-    enabled: !!visible && modelProvider !== "auto",
-    refreshToken: discoveryRefresh,
-  });
-  const discoveryListId = "provider-model-discovery";
-
   return (
     <div className="settings-container">
       <h1 className="settings-header">{t("providers.title")}</h1>
       <p className="models-subtitle" style={{ marginBottom: 16 }}>
         {t("providers.subtitle")}
       </p>
-
-      <div className="settings-section">
-        <div className="settings-section-title">
-          {t("common.model")}
-          {modelSaved && (
-            <span className="settings-saved" style={{ marginLeft: 8 }}>
-              {t("common.saved")}
-            </span>
-          )}
-        </div>
-
-        <div className="settings-field">
-          <label className="settings-field-label">{t("common.provider")}</label>
-          <div className="settings-provider-row">
-            <BrandLogo provider={modelProvider} modelId={modelName} size={20} />
-            <select
-              className="input settings-select"
-              value={modelProvider}
-              onChange={(e) => {
-                const v = e.target.value;
-                setModelProvider(v);
-                if (v === "custom") {
-                  // Seed a local-LLM placeholder only when the field is empty
-                  // (don't clobber an existing custom URL the user has typed).
-                  if (!modelBaseUrl) {
-                    setModelBaseUrl("http://localhost:1234/v1");
-                  }
-                } else {
-                  // Switching to a named provider — its base_url is hardcoded
-                  // by the gateway, and a stale URL from a prior provider
-                  // would either be ignored (best case) or misroute (worst).
-                  setModelBaseUrl("");
-                }
-              }}
-            >
-              {PROVIDERS.options.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {t(opt.label)}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="settings-field-hint">
-            {isCustomProvider
-              ? t("settings.customProviderHint")
-              : t("settings.providerHint")}
-          </div>
-        </div>
-
-        <div className="settings-field">
-          <label className="settings-field-label">{t("common.model")}</label>
-          <div className="settings-model-row">
-            <input
-              className="input"
-              type="text"
-              value={modelName}
-              onChange={(e) => setModelName(e.target.value)}
-              placeholder={t("settings.modelNamePlaceholder")}
-              list={
-                discovery.models.length > 0 ? discoveryListId : undefined
-              }
-              autoComplete="off"
-            />
-            {discovery.status !== "unsupported" &&
-              discovery.status !== "idle" && (
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => setDiscoveryRefresh((n) => n + 1)}
-                  disabled={discovery.status === "loading"}
-                  title={t("settings.refreshModels")}
-                >
-                  ↻
-                </button>
-              )}
-          </div>
-          {discovery.models.length > 0 && (
-            <datalist id={discoveryListId}>
-              {discovery.models.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
-          )}
-          <div className="settings-field-hint">
-            {discovery.status === "loading"
-              ? t("settings.discoveringModels")
-              : discovery.status === "ok"
-                ? t("settings.discoveredCount", {
-                    count: discovery.models.length,
-                  })
-                : discovery.status === "no-key"
-                  ? t("settings.discoveryNoKey")
-                  : discovery.status === "error"
-                    ? t("settings.discoveryError")
-                    : t("settings.modelHint")}
-          </div>
-        </div>
-
-        {isCustomProvider && (
-          <div className="settings-field">
-            <label className="settings-field-label">
-              {t("common.baseUrl")}
-            </label>
-            <input
-              className="input"
-              type="text"
-              value={modelBaseUrl}
-              onChange={(e) => setModelBaseUrl(e.target.value)}
-              placeholder={t("settings.modelBaseUrlPlaceholder")}
-            />
-            <div className="settings-field-hint">
-              {t("settings.customBaseUrlHint")}
-            </div>
-          </div>
-        )}
-      </div>
 
       <div className="settings-section">
         <div className="settings-section-title">
@@ -451,43 +251,23 @@ function Providers({
         </div>
       </div>
 
-      {SETTINGS_SECTIONS.map((section) => {
-        const isLlmProviders =
-          section.title === "constants.sectionLlmProviders";
+      {SETTINGS_SECTIONS.filter(
+        (section) => section.title !== "constants.sectionLlmProviders",
+      ).map((section) => {
         return (
           <div key={section.title} className="settings-section">
             <div className="settings-section-title">{t(section.title)}</div>
-            <div className={isLlmProviders ? "provider-keys-grid" : undefined}>
+            <div>
               {section.items.map((field) => (
-                <div
-                  key={field.key}
-                  className={
-                    isLlmProviders ? "provider-key-card" : "settings-field"
-                  }
-                >
-                  {isLlmProviders && (
-                    <div className="provider-key-card-head">
-                      <BrandLogo provider={field.key} size={22} />
-                      <span className="provider-key-card-title">
-                        {t(field.label)}
+                <div key={field.key} className="settings-field">
+                  <label className="settings-field-label">
+                    {t(field.label)}
+                    {savedKey === field.key && (
+                      <span className="settings-saved">
+                        {t("common.saved")}
                       </span>
-                      {savedKey === field.key && (
-                        <span className="settings-saved">
-                          {t("common.saved")}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                  {!isLlmProviders && (
-                    <label className="settings-field-label">
-                      {t(field.label)}
-                      {savedKey === field.key && (
-                        <span className="settings-saved">
-                          {t("common.saved")}
-                        </span>
-                      )}
-                    </label>
-                  )}
+                    )}
+                  </label>
                   <div className="settings-input-row">
                     <input
                       className="input"

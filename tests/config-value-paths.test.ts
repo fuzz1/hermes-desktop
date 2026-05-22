@@ -3,6 +3,8 @@ import { join } from "path";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 
+vi.mock("electron", () => ({}));
+
 // Regression tests for issue #247: getConfigValue/setConfigValue used
 // a loose `^\s*<key>:` regex against the whole file, so:
 //   - Dotted paths (e.g. "agent.service_tier") never matched, since the

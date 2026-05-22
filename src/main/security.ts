@@ -1,7 +1,7 @@
 import type { WebContents, WebPreferences } from "electron";
 import { pathToFileURL } from "url";
 
-const EXTERNAL_PROTOCOLS = new Set(["https:", "http:", "mailto:"]);
+const EXTERNAL_PROTOCOLS = new Set(["https:", "mailto:"]);
 const LOCAL_WEBVIEW_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
 type WebviewPreferences = WebPreferences & {
@@ -19,7 +19,9 @@ function parseUrl(rawUrl: unknown): URL | null {
 
 export function isAllowedExternalUrl(rawUrl: unknown): rawUrl is string {
   const url = parseUrl(rawUrl);
-  return !!url && EXTERNAL_PROTOCOLS.has(url.protocol);
+  if (!url) return false;
+  if (EXTERNAL_PROTOCOLS.has(url.protocol)) return true;
+  return url.protocol === "http:" && LOCAL_WEBVIEW_HOSTS.has(url.hostname);
 }
 
 export function isAllowedAppNavigationUrl(

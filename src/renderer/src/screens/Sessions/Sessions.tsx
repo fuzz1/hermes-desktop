@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, memo } from "react";
-import { Plus, Search, X, ChatBubble } from "../../assets/icons";
+import { Plus, Search, X, ChatBubble, Trash } from "../../assets/icons";
 import { useI18n } from "../../components/useI18n";
 
 interface CachedSession {
@@ -110,16 +110,36 @@ const SessionCard = memo(function SessionCard({
   isActive,
   showFullDate,
   onClick,
+  onDelete,
+  confirmDelete,
+  onConfirmDelete,
+  onCancelDelete,
 }: {
   session: CachedSession;
   isActive: boolean;
   showFullDate: boolean;
   onClick: () => void;
+  onDelete: () => void;
+  confirmDelete: boolean;
+  onConfirmDelete: () => void;
+  onCancelDelete: () => void;
 }) {
+  const { t } = useI18n();
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>): void {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onClick();
+    }
+  }
+
   return (
-    <button
+    <div
       className={`sessions-card ${isActive ? "sessions-card--active" : ""}`}
+      role="button"
+      tabIndex={0}
       onClick={onClick}
+      onKeyDown={handleKeyDown}
     >
       <div className="sessions-card-main">
         <span className="sessions-card-title">
@@ -144,7 +164,34 @@ const SessionCard = memo(function SessionCard({
           </span>
         )}
       </div>
-    </button>
+      <div className="sessions-card-actions" onClick={(e) => e.stopPropagation()}>
+        {confirmDelete ? (
+          <div className="sessions-card-confirm">
+            <span>{t("sessions.deleteConfirm")}</span>
+            <button
+              type="button"
+              className="btn btn-sm btn-danger-text"
+              onClick={onConfirmDelete}
+            >
+              {t("sessions.yes")}
+            </button>
+            <button type="button" className="btn btn-sm" onClick={onCancelDelete}>
+              {t("sessions.no")}
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="btn-ghost sessions-card-delete"
+            onClick={onDelete}
+            title={t("sessions.deleteTitle")}
+            aria-label={t("sessions.deleteTitle")}
+          >
+            <Trash size={14} />
+          </button>
+        )}
+      </div>
+    </div>
   );
 });
 
@@ -160,6 +207,7 @@ function Sessions({
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -206,6 +254,14 @@ function Sessions({
       if (searchTimer.current) clearTimeout(searchTimer.current);
     };
   }, [searchQuery]);
+
+  async function handleDeleteSession(sessionId: string): Promise<void> {
+    await window.hermesAPI.deleteSession(sessionId);
+    await window.hermesAPI.clearStagedAttachments(sessionId);
+    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    setSearchResults((prev) => prev.filter((s) => s.sessionId !== sessionId));
+    setConfirmDelete(null);
+  }
 
   const isShowingSearch = searchQuery.trim().length > 0;
   const grouped = groupSessions(sessions);
@@ -264,10 +320,18 @@ function Sessions({
         ) : (
           <div className="sessions-list">
             {searchResults.map((r) => (
-              <button
+              <div
                 key={r.sessionId}
                 className={`sessions-card ${currentSessionId === r.sessionId ? "sessions-card--active" : ""}`}
+                role="button"
+                tabIndex={0}
                 onClick={() => onResumeSession(r.sessionId)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onResumeSession(r.sessionId);
+                  }
+                }}
               >
                 <div className="sessions-card-main">
                   <span className="sessions-card-title">
@@ -299,7 +363,41 @@ function Sessions({
                     </span>
                   )}
                 </div>
-              </button>
+                <div
+                  className="sessions-card-actions"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {confirmDelete === r.sessionId ? (
+                    <div className="sessions-card-confirm">
+                      <span>{t("sessions.deleteConfirm")}</span>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-danger-text"
+                        onClick={() => handleDeleteSession(r.sessionId)}
+                      >
+                        {t("sessions.yes")}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => setConfirmDelete(null)}
+                      >
+                        {t("sessions.no")}
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-ghost sessions-card-delete"
+                      onClick={() => setConfirmDelete(r.sessionId)}
+                      title={t("sessions.deleteTitle")}
+                      aria-label={t("sessions.deleteTitle")}
+                    >
+                      <Trash size={14} />
+                    </button>
+                  )}
+                </div>
+              </div>
             ))}
           </div>
         )
@@ -325,6 +423,10 @@ function Sessions({
                     group.label === "thisWeek" || group.label === "earlier"
                   }
                   onClick={() => onResumeSession(s.id)}
+                  onDelete={() => setConfirmDelete(s.id)}
+                  confirmDelete={confirmDelete === s.id}
+                  onConfirmDelete={() => handleDeleteSession(s.id)}
+                  onCancelDelete={() => setConfirmDelete(null)}
                 />
               ))}
             </div>

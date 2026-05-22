@@ -13,4 +13,8 @@ export default {
   emptyHint: "开始聊天以创建第一条会话",
   messages: "条消息",
   messageSingular: "条消息",
+  deleteTitle: "删除会话",
+  deleteConfirm: "删除？",
+  yes: "是",
+  no: "否",
 } as const;

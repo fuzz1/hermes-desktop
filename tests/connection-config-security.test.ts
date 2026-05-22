@@ -5,6 +5,8 @@ import { join } from "path";
 import http from "http";
 import type { AddressInfo } from "net";
 
+vi.mock("electron", () => ({}));
+
 let testHome: string;
 
 async function loadConnectionConfigModule(): Promise<
@@ -130,5 +132,32 @@ describe("connection config secret exposure", () => {
     expect(publicConfig.ssh.host).toBe("example.internal");
     expect("apiKey" in publicConfig).toBe(false);
     expect(JSON.stringify(publicConfig)).not.toContain("remote-secret");
+  });
+
+  it("redacts credential-pool secrets but preserves them on write-back", async () => {
+    const {
+      getCredentialPool,
+      getPublicCredentialPool,
+      setCredentialPool,
+    } = await loadConnectionConfigModule();
+
+    setCredentialPool("openai", [
+      { key: "sk-first-secret", label: "Primary" },
+      { key: "sk-second-secret", label: "Secondary" },
+    ]);
+
+    const publicPool = getPublicCredentialPool();
+    expect(JSON.stringify(publicPool)).not.toContain("sk-first-secret");
+    expect(publicPool.openai[0].key).toBe("********cret");
+
+    setCredentialPool("openai", [
+      { key: publicPool.openai[0].key, label: "Primary" },
+      { key: "sk-third-secret", label: "Third" },
+    ]);
+
+    expect(getCredentialPool().openai).toEqual([
+      { key: "sk-first-secret", label: "Primary" },
+      { key: "sk-third-secret", label: "Third" },
+    ]);
   });
 });

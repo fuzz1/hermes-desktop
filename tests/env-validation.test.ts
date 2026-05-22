@@ -3,6 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
+vi.mock("electron", () => ({}));
+
 let testHome: string;
 
 async function loadConfigModule(): Promise<
@@ -83,5 +85,28 @@ describe("environment variable write validation", () => {
     expect(env.EMPTY_FLAG).toBe("");
     expect(env.WITH_VALUE).toBe("present");
     expect(readEnvFile()).toContain("EMPTY_FLAG=\n");
+  });
+
+  it("redacts sensitive values for renderer-facing env reads", async () => {
+    const { readEnv, readPublicEnv, setEnvValue } = await loadConfigModule();
+
+    setEnvValue("OPENAI_API_KEY", "sk-secret-value");
+    setEnvValue("REGULAR_SETTING", "plain");
+
+    expect(readEnv().OPENAI_API_KEY).toBe("sk-secret-value");
+    expect(readPublicEnv()).toEqual({
+      OPENAI_API_KEY: "********alue",
+      REGULAR_SETTING: "plain",
+    });
+  });
+
+  it("does not persist redacted placeholders back over real secrets", async () => {
+    const { readEnv, setEnvValue } = await loadConfigModule();
+
+    setEnvValue("OPENAI_API_KEY", "sk-secret-value");
+    setEnvValue("OPENAI_API_KEY", "********alue");
+
+    expect(readEnv().OPENAI_API_KEY).toBe("sk-secret-value");
+    expect(readEnvFile()).toContain("OPENAI_API_KEY=sk-secret-value");
   });
 });

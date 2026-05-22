@@ -23,5 +23,5 @@ export default {
   customProviderHint: "Hanya diperlukan untuk provider kustom atau lokal",
   apiKeyLabel: "API Key",
   apiKeyHint:
-    "Disimpan sebagai environment variable. Memilih env key yang cocok berdasarkan URL, atau CUSTOM_API_KEY jika tidak ada.",
+    "Disimpan sebagai environment variable. Memilih env key yang cocok berdasarkan URL, atau membuat *_API_KEY untuk domain yang tidak dikenal.",
 } as const;

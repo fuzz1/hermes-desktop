@@ -67,6 +67,17 @@ describe("Electron main process hardening", () => {
     );
     expect(installerSrc).toContain("sudoPrecache.stop();");
   });
+
+  it("pins Hermes Agent installer downloads to an audited ref", () => {
+    expect(installerSrc).toContain("HERMES_AGENT_INSTALL_REF");
+    expect(installerSrc).toContain("v2026.5.16");
+    expect(installerSrc).not.toContain(
+      "raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1",
+    );
+    expect(installerSrc).not.toContain(
+      "raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh",
+    );
+  });
 });
 
 describe("Electron external URL policy", () => {
@@ -77,6 +88,7 @@ describe("Electron external URL policy", () => {
   });
 
   it("blocks dangerous or ambiguous external URLs", () => {
+    expect(isAllowedExternalUrl("http://example.com")).toBe(false);
     expect(isAllowedExternalUrl("javascript:alert(1)")).toBe(false);
     expect(
       isAllowedExternalUrl("data:text/html,<script>alert(1)</script>"),

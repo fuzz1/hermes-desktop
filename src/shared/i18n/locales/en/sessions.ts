@@ -13,4 +13,8 @@ export default {
   emptyHint: "Start chatting to create your first session",
   messages: "msg",
   messageSingular: "msg",
+  deleteTitle: "Delete session",
+  deleteConfirm: "Delete?",
+  yes: "Yes",
+  no: "No",
 } as const;

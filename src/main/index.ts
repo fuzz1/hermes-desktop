@@ -7,6 +7,7 @@ import {
   Notification,
   dialog,
 } from "electron";
+import { existsSync } from "fs";
 import { join } from "path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import type { AppUpdater } from "electron-updater";
@@ -70,14 +71,15 @@ import {
 } from "./claw3d";
 import { startOfficeStack } from "./office-start";
 import {
-  readEnv,
+  readPublicEnv,
+  redactEnvRecord,
   setEnvValue,
   getConfigValue,
   setConfigValue,
   getHermesHome,
   getModelConfig,
   setModelConfig,
-  getCredentialPool,
+  getPublicCredentialPool,
   setCredentialPool,
   getConnectionConfig,
   getPublicConnectionConfig,
@@ -157,6 +159,7 @@ import {
   isAllowedWebviewUrl,
 } from "./security";
 import type { AppLocale } from "../shared/i18n/types";
+import { ChatAbortRegistry } from "./chat-aborts";
 import {
   sshListInstalledSkills,
   sshGetSkillContent,
@@ -214,7 +217,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 let mainWindow: BrowserWindow | null = null;
-let currentChatAbort: (() => void) | null = null;
+const chatAborts = new ChatAbortRegistry();
 
 function openExternalUrl(rawUrl: unknown): void {
   if (!isAllowedExternalUrl(rawUrl)) {
@@ -405,8 +408,9 @@ function setupIPC(): void {
 
   ipcMain.handle("get-env", (_event, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshReadEnv(conn.ssh, profile);
-    return readEnv(profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshReadEnv(conn.ssh, profile).then(redactEnvRecord);
+    return readPublicEnv(profile);
   });
 
   ipcMain.handle(
@@ -430,7 +434,7 @@ function setupIPC(): void {
         key.endsWith("_API_KEY") ||
         key.endsWith("_TOKEN") ||
         key === "HF_TOKEN";
-      if (isGatewayRunning() && looksLikeCredential) {
+      if (isGatewayRunning(profile) && looksLikeCredential) {
         restartGateway(profile);
       }
       return true;
@@ -500,7 +504,7 @@ function setupIPC(): void {
 
       // Restart gateway when provider, model, or endpoint changes so it picks up new config
       if (
-        isGatewayRunning() &&
+        isGatewayRunning(profile) &&
         (prev.provider !== provider ||
           prev.model !== model ||
           prev.baseUrl !== baseUrl)
@@ -619,7 +623,7 @@ function setupIPC(): void {
       history?: Array<{ role: string; content: string }>,
       attachments?: Attachment[],
     ) => {
-      if (!isRemoteMode() && !isGatewayRunning()) {
+      if (!isRemoteMode() && !isGatewayRunning(profile)) {
         startGateway(profile);
       }
 
@@ -636,9 +640,7 @@ function setupIPC(): void {
         }
       }
 
-      if (currentChatAbort) {
-        currentChatAbort();
-      }
+      chatAborts.abort(profile, resumeSessionId);
 
       let fullResponse = "";
       const chatStartTime = Date.now();
@@ -659,7 +661,7 @@ function setupIPC(): void {
             event.sender.send("chat-chunk", chunk);
           },
           onDone: (sessionId) => {
-            currentChatAbort = null;
+            chatAborts.clear(profile, resumeSessionId);
             event.sender.send("chat-done", sessionId || "");
             resolveChat({ response: fullResponse, sessionId });
             // Desktop notification when window is not focused and response took >10s
@@ -679,7 +681,7 @@ function setupIPC(): void {
             }
           },
           onError: (error) => {
-            currentChatAbort = null;
+            chatAborts.clear(profile, resumeSessionId);
             event.sender.send("chat-error", error);
             rejectChat(new Error(error));
             // Notify on error too if window not focused
@@ -703,16 +705,13 @@ function setupIPC(): void {
         attachments,
       );
 
-      currentChatAbort = handle.abort;
+      chatAborts.replace(profile, resumeSessionId, handle.abort);
       return promise;
     },
   );
 
   ipcMain.handle("abort-chat", () => {
-    if (currentChatAbort) {
-      currentChatAbort();
-      currentChatAbort = null;
-    }
+    chatAborts.abortAll();
   });
 
   // Attachment staging — for pasted blobs that have no filesystem origin.
@@ -741,7 +740,7 @@ function setupIPC(): void {
   );
 
   // Gateway
-  ipcMain.handle("start-gateway", async () => {
+  ipcMain.handle("start-gateway", async (_event, profile?: string) => {
     const conn = getConnectionConfig();
     if (conn.mode === "ssh" && conn.ssh) {
       await sshStartGateway(conn.ssh);
@@ -753,9 +752,9 @@ function setupIPC(): void {
       // spawn a non-existent local hermes-agent (issue #266).
       return false;
     }
-    return startGateway();
+    return startGateway(profile);
   });
-  ipcMain.handle("stop-gateway", async () => {
+  ipcMain.handle("stop-gateway", async (_event, profile?: string) => {
     const conn = getConnectionConfig();
     if (conn.mode === "ssh" && conn.ssh) {
       await sshStopGateway(conn.ssh);
@@ -765,13 +764,13 @@ function setupIPC(): void {
       // No local gateway to stop in pure remote mode.
       return true;
     }
-    stopGateway(true);
+    stopGateway(true, profile);
     return true;
   });
-  ipcMain.handle("gateway-status", () => {
+  ipcMain.handle("gateway-status", (_event, profile?: string) => {
     const conn = getConnectionConfig();
     if (conn.mode === "ssh" && conn.ssh) return sshGatewayStatus(conn.ssh);
-    return isGatewayRunning();
+    return isGatewayRunning(profile);
   });
 
   // Platform toggles (config.yaml platforms section)
@@ -791,7 +790,7 @@ function setupIPC(): void {
       }
       setPlatformEnabled(platform, enabled, profile);
       // Restart gateway so it picks up the new platform config
-      if (isGatewayRunning()) {
+      if (isGatewayRunning(profile)) {
         restartGateway(profile);
       }
       return true;
@@ -991,7 +990,7 @@ function setupIPC(): void {
   // auth.json (see config.ts:authFilePath), so the renderer can pass an
   // explicit profile or rely on the active-profile fallback.
   ipcMain.handle("get-credential-pool", (_event, profile?: string) =>
-    getCredentialPool(profile),
+    getPublicCredentialPool(profile),
   );
   ipcMain.handle(
     "set-credential-pool",
@@ -1387,11 +1386,24 @@ function setupUpdater(): void {
   // IPC handlers must always be registered to avoid invoke errors
   ipcMain.handle("get-app-version", () => app.getVersion());
 
-  if (!app.isPackaged) {
+  const disableUpdater = (): void => {
     // Skip auto-update in dev mode
     ipcMain.handle("check-for-updates", async () => null);
     ipcMain.handle("download-update", () => true);
     ipcMain.handle("install-update", () => {});
+  };
+
+  if (!app.isPackaged) {
+    disableUpdater();
+    return;
+  }
+
+  const updateConfigPath = join(process.resourcesPath, "app-update.yml");
+  if (!existsSync(updateConfigPath)) {
+    console.info(
+      `Auto-update disabled: missing update config at ${updateConfigPath}`,
+    );
+    disableUpdater();
     return;
   }
 
@@ -1403,6 +1415,7 @@ function setupUpdater(): void {
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+  let showUpdateErrors = false;
 
   autoUpdater.on("update-available", (info) => {
     mainWindow?.webContents.send("update-available", {
@@ -1418,11 +1431,16 @@ function setupUpdater(): void {
   });
 
   autoUpdater.on("update-downloaded", () => {
+    showUpdateErrors = false;
     mainWindow?.webContents.send("update-downloaded");
   });
 
   autoUpdater.on("error", (err) => {
-    mainWindow?.webContents.send("update-error", err.message);
+    if (showUpdateErrors) {
+      mainWindow?.webContents.send("update-error", err.message);
+    } else {
+      console.warn(`Auto-update check failed: ${err.message}`);
+    }
   });
 
   ipcMain.handle("check-for-updates", async () => {
@@ -1435,6 +1453,7 @@ function setupUpdater(): void {
   });
 
   ipcMain.handle("download-update", async () => {
+    showUpdateErrors = true;
     try {
       await autoUpdater.downloadUpdate();
       return true;
@@ -1442,6 +1461,8 @@ function setupUpdater(): void {
       const message = err instanceof Error ? err.message : String(err);
       mainWindow?.webContents.send("update-error", message);
       return false;
+    } finally {
+      showUpdateErrors = false;
     }
   });
 
@@ -1504,10 +1525,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   stopHealthPolling();
-  if (currentChatAbort) {
-    currentChatAbort();
-    currentChatAbort = null;
-  }
+  chatAborts.abortAll();
   stopGateway();
   stopSshTunnel();
   stopClaw3d();

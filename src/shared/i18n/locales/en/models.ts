@@ -23,5 +23,5 @@ export default {
   customProviderHint: "Only required for custom or local providers",
   apiKeyLabel: "API Key",
   apiKeyHint:
-    "Stored as an environment variable. Picks the matching env key based on the URL, or CUSTOM_API_KEY otherwise.",
+    "Stored as an environment variable. Picks the matching env key based on the URL, or derives *_API_KEY for unknown domains.",
 } as const;

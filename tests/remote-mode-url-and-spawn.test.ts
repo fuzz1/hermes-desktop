@@ -21,6 +21,8 @@ const { TEST_HOME, connModeRef, spawnSpy } = vi.hoisted(() => {
     TEST_HOME: path.join(os.tmpdir(), `hermes-remote-test-${Date.now()}`),
     connModeRef: { mode: "local" as "local" | "remote" | "ssh" },
     spawnSpy: vi.fn(() => ({
+      killed: false,
+      kill: vi.fn(),
       unref: () => {},
       pid: 12345,
       on: () => {},
@@ -89,7 +91,9 @@ vi.mock("child_process", async () => {
 
 import {
   normaliseRemoteUrl,
+  sendMessage,
   startGateway,
+  stopHealthPolling,
   restartGateway,
   testRemoteConnection,
 } from "../src/main/hermes";
@@ -218,5 +222,28 @@ describe("startGateway / restartGateway in remote mode", () => {
     connModeRef.mode = "ssh";
     restartGateway();
     expect(spawnSpy).not.toHaveBeenCalled();
+  });
+
+});
+
+describe("local chat gateway contract", () => {
+  it("does not silently spawn the CLI fallback when the local Gateway is unavailable", async () => {
+    spawnSpy.mockClear();
+    connModeRef.mode = "local";
+    process.env.HERMES_DESKTOP_GATEWAY_READY_TIMEOUT_MS = "0";
+    delete process.env.HERMES_DESKTOP_ALLOW_CLI_CHAT_FALLBACK;
+    const errors: string[] = [];
+
+    await sendMessage("hello", {
+      onChunk: () => {},
+      onDone: () => {},
+      onError: (error) => errors.push(error),
+    });
+    await Promise.resolve();
+
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(errors.join("\n")).toContain("Hermes Gateway API is not available");
+    stopHealthPolling();
+    delete process.env.HERMES_DESKTOP_GATEWAY_READY_TIMEOUT_MS;
   });
 });

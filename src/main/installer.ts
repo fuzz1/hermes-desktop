@@ -6,7 +6,7 @@ import {
   writeFileSync,
   unlinkSync,
 } from "fs";
-import { join, delimiter } from "path";
+import { dirname, join, delimiter } from "path";
 import { homedir, tmpdir } from "os";
 import { randomBytes } from "crypto";
 import type { BrowserWindow } from "electron";
@@ -20,19 +20,20 @@ import { getActiveProfileNameSync, profileHome, stripAnsi } from "./utils";
 import { setupAskpass, AskpassHandle } from "./askpass";
 import { precacheSudoCredentials } from "./sudoCreds";
 import { HIDDEN_SUBPROCESS_OPTIONS } from "./process-options";
+import { deriveApiKeyEnvFromBaseUrl } from "../shared/provider-env";
 
 const IS_WINDOWS = process.platform === "win32";
+export const HERMES_AGENT_INSTALL_REF =
+  process.env.HERMES_AGENT_INSTALL_REF?.trim() || "v2026.5.16";
 
 // Resolve the Hermes data directory. Precedence:
-//   1. HERMES_HOME env var if set (install.ps1 sets it User-scope on
-//      Windows; users may also override manually for WSL/custom setups).
-//   2. On Windows, probe both candidates and pick whichever already has
-//      data. install.ps1's default is %LOCALAPPDATA%\hermes, but some
-//      setups put data at ~/.hermes (e.g. a junction into WSL, or a
-//      custom -HermesHome flag on install). Without probing we'd silently
-//      switch directories on users who had it working before.
-//   3. Fresh install fallback: %LOCALAPPDATA%\hermes on Windows (matches
-//      install.ps1's default), ~/.hermes elsewhere.
+//   1. HERMES_HOME env var if set.
+//   2. Existing Windows homes, to keep current installations working even when
+//      Electron was launched without shell environment variables.
+//   3. Fresh Windows install fallback: the desktop app's installation
+//      directory. This makes the Agent live next to the selected desktop
+//      install location instead of silently going to %LOCALAPPDATA%\hermes.
+//      On non-Windows platforms, keep ~/.hermes.
 //
 // Motivating bug: Electron launched from the Start Menu doesn't always
 // inherit shell-set env vars, so relying on HERMES_HOME alone left
@@ -53,17 +54,20 @@ function defaultHermesHome(): string {
   const homeDot = join(homedir(), ".hermes");
   if (!IS_WINDOWS) return homeDot;
 
+  const desktopInstallHome = dirname(process.execPath);
   const localApp = process.env.LOCALAPPDATA
     ? join(process.env.LOCALAPPDATA, "hermes")
     : null;
+  const configuredLocalHome = "D:\\program\\hermes";
 
   // Prefer whichever location already has hermes data.
+  if (looksLikeHermesHome(desktopInstallHome)) return desktopInstallHome;
   if (localApp && looksLikeHermesHome(localApp)) return localApp;
+  if (looksLikeHermesHome(configuredLocalHome)) return configuredLocalHome;
   if (looksLikeHermesHome(homeDot)) return homeDot;
 
-  // Neither populated yet — fall back to install.ps1's default so a
-  // fresh install lines up with where the installer will write.
-  return localApp ?? homeDot;
+  // Neither populated yet — place new Agent installs beside the desktop app.
+  return desktopInstallHome;
 }
 
 export const HERMES_HOME =
@@ -262,6 +266,8 @@ export function expectedEnvKeyForModel(
   for (const [pattern, envKey] of URL_TO_ENV_KEY) {
     if (pattern.test(baseUrl)) return envKey;
   }
+  const derived = deriveApiKeyEnvFromBaseUrl(baseUrl);
+  if (derived) return derived;
   return null;
 }
 
@@ -739,7 +745,7 @@ export async function runInstall(
       const shellProfile = getShellProfile(home);
       const installCmd = [
         shellProfile ? `source "${shellProfile}" 2>/dev/null;` : "",
-        "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup",
+    `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_AGENT_INSTALL_REF}/scripts/install.sh | bash -s -- --skip-setup`,
       ].join(" ");
 
       const basePath = getEnhancedPath();
@@ -823,8 +829,8 @@ function resolvePowerShellExe(): string {
 
 async function runInstallWindows(emit: (t: string) => void): Promise<void> {
   // We can't `irm | iex` and pass parameters, and we want to override the
-  // upstream defaults (which install to %LOCALAPPDATA%\hermes) so the
-  // desktop app's HERMES_HOME == ~\.hermes convention keeps working.
+  // upstream defaults so the Agent installs into the HERMES_HOME resolved by
+  // this desktop app (env var, existing home, or the selected app directory).
   // Strategy: write a small wrapper .ps1 to %TEMP%, run it with -File.
   const home = homedir();
   const hermesHome = HERMES_HOME;
@@ -842,7 +848,7 @@ async function runInstallWindows(emit: (t: string) => void): Promise<void> {
     // Force TLS 1.2 for older Windows PowerShell 5.1 hosts that still default
     // to TLS 1.0 — github raw refuses TLS < 1.2.
     "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}",
-    "$url = 'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1'",
+    `$url = 'https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_AGENT_INSTALL_REF}/scripts/install.ps1'`,
     `$installer = Join-Path $env:TEMP ("hermes-install-script-" + [guid]::NewGuid().ToString() + ".ps1")`,
     // Windows PowerShell 5.1 parses BOM-less files as the legacy ANSI codepage,
     // which mangles the non-ASCII glyphs in install.ps1 and produces parse
@@ -924,7 +930,7 @@ async function runInstallWindows(emit: (t: string) => void): Promise<void> {
       } else {
         reject(
           new Error(
-            `Installation failed (exit code ${code}). Open PowerShell and try: irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex`,
+            `Installation failed (exit code ${code}). Open PowerShell and try: irm https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_AGENT_INSTALL_REF}/scripts/install.ps1 | iex`,
           ),
         );
       }

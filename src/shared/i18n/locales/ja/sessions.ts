@@ -13,4 +13,8 @@ export default {
   emptyHint: "チャットを始めて最初のセッションを作りましょう",
   messages: "件",
   messageSingular: "件",
+  deleteTitle: "セッションを削除",
+  deleteConfirm: "削除しますか？",
+  yes: "はい",
+  no: "いいえ",
 } as const;

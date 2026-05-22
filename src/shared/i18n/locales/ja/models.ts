@@ -23,5 +23,5 @@ export default {
   customProviderHint: "カスタムまたはローカルプロバイダの場合のみ必要です",
   apiKeyLabel: "API キー",
   apiKeyHint:
-    "環境変数として保存されます。URL に基づいて該当する環境変数キーが選ばれ、なければ CUSTOM_API_KEY が使われます。",
+    "環境変数として保存されます。URL に基づいて該当する環境変数キーが選ばれ、不明なドメインでは *_API_KEY が派生されます。",
 } as const;
